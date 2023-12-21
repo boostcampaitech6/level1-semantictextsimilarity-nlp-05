@@ -14,6 +14,7 @@ import os
 import requests
 import json
 from pytorch_lightning.loggers import WandbLogger
+from transformers import get_linear_schedule_with_warmup
 
 from glob import glob
 import wandb
@@ -59,7 +60,7 @@ class Dataloader(pl.LightningDataModule):
         self.test_dataset = None
         self.predict_dataset = None
 
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, max_length=160)
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, max_length=140)
 
         self.target_columns = ['label']
         self.binary_target_columns = ['binary-label']
@@ -128,13 +129,14 @@ class Dataloader(pl.LightningDataModule):
 
 
 class Model(pl.LightningModule):
-    def __init__(self, model_name, lr, wd=0):
+    def __init__(self, model_name, lr, wd=0, ws=0):
         super().__init__()
         self.save_hyperparameters()
 
         self.model_name = model_name
         self.lr = lr
         self.wd = wd
+        self.ws = ws
 
         # 사용할 모델을 호출합니다.
         self.plm = transformers.AutoModelForSequenceClassification.from_pretrained(
@@ -142,8 +144,11 @@ class Model(pl.LightningModule):
             num_labels=1,
         )
 
+        # for param in self.plm.parameters():
+        #      print(param.requires_grad)
+
         # Loss 계산을 위해 사용될 MSELoss를 호출합니다.
-        self.first_loss_func = torch.nn.L1Loss()
+        self.first_loss_func = torch.nn.MSELoss()
         self.second_loss_func = torch.nn.BCEWithLogitsLoss()
 
     def forward(self, x):
@@ -184,24 +189,28 @@ class Model(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=self.ws)
         return optimizer
+
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', default='klue/roberta-large', type=str)
-    parser.add_argument('--batch_size', default=8, type=int)
+    parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--max_epoch', default=5, type=int)
     parser.add_argument('--warmup_steps', default=297, type=int)
-    parser.add_argument('--weight_decay', default=0.024030913724965405, type=float)
+    parser.add_argument('--weight_decay', default=0.001, type=float)
     parser.add_argument('--bce', default=False)
     parser.add_argument('--shuffle', default=True)
-    parser.add_argument('--learning_rate', default=2e-5, type=float)
-    parser.add_argument('--train_path', default='../data/train.csv')
-    parser.add_argument('--dev_path', default='../data/dev.csv')
-    parser.add_argument('--test_path', default='../data/dev.csv')
-    parser.add_argument('--predict_path', default='../data/test.csv')
+    parser.add_argument('--learning_rate', default=1.9652545776142725e-05, type=float)
+    parser.add_argument('--train_path', default='../data/rtt_swap_stopword/train.csv')
+    parser.add_argument('--dev_path', default='../data/rtt_swap_stopword/dev.csv')
+    parser.add_argument('--test_path', default='../data/rtt_swap_stopword/dev.csv')
+    parser.add_argument('--predict_path', default='../data/rtt_swap_stopword/test.csv')
     parser.add_argument('--mode', required=True)
+    parser.add_argument('--model_save', default=True)
+    parser.add_argument('--wandb_name', default='project', required=True, type=str)
     args = parser.parse_args()
 
     dataloader = Dataloader(args.model_name, args.batch_size, args.shuffle, args.train_path, args.dev_path,
@@ -209,13 +218,12 @@ if __name__ == '__main__':
 
     sweep_config = {
         'method': 'random',  # random: 임의의 값의 parameter 세트를 선택
-        'parameters': {
-            'lr': {
-                'distribution': 'uniform',  # parameter를 설정하는 기준을 선택합니다. uniform은 연속적으로 균등한 값들을 선택합니다.
-                'min': 2e-6,  # 최소값을 설정합니다.
-                'max': 3e-6  # 최대값을 설정합니다.
-            }
-        }
+        "parameters": {
+            "batch_size": {"values": [16]},
+            "lr" : {"values" : [2.306e-06]},
+            # "lr": {"max": 2e-5, "min": 1.9e-5},
+            "ws": {"max": 300, "min": 0}
+        },
     }
 
     if args.bce:
@@ -230,29 +238,48 @@ if __name__ == '__main__':
     def sweep_train(config=None):
         wandb.init(config=config)
         config = wandb.config
+        print("----------------lr----------------")
+        print(config.lr)
+        print(config.ws)
+        print("----------------------------------")
 
         dataloader = Dataloader(args.model_name, args.batch_size, args.shuffle, args.train_path, args.dev_path,
                                 args.test_path, args.predict_path)
-        model = Model(args.model_name, config.lr)
-        wandb_logger = WandbLogger(project="klue-roberta-large")
+        model = Model(args.model_name, config.lr, config.ws)
+        wandb_logger = WandbLogger(project='klue-roberta-large')
 
-        trainer = pl.Trainer(max_epochs=args.max_epoch, logger=wandb_logger, log_every_n_steps=1)
+        trainer = pl.Trainer(max_epochs=args.max_epoch, logger=wandb_logger, log_every_n_steps=1, precision=16)
         trainer.fit(model=model, datamodule=dataloader)
         trainer.test(model=model, datamodule=dataloader)
+
+        if args.model_save == True:
+            torch.save(model, f"klue-roberta-large-stopword_lr{config.lr}_weight_decay{args.weight_decay}_epoch{args.max_epoch}_model.pt")
 
 
     # Sweep 생성
 
-    sweep_id = wandb.sweep(
-        sweep=sweep_config,  # config 딕셔너리를 추가합니다.
-        project='project_name'  # project의 이름을 추가합니다.
-    )
-    wandb.agent(
-        sweep_id=sweep_id,  # sweep의 정보를 입력하고
-        function=sweep_train,  # train이라는 모델을 학습하는 코드를
-        count=5  # 총 3회 실행해봅니다.
-    )
+    if args.mode == 'train':
+        sweep_id = wandb.sweep(
+            sweep=sweep_config,  # config 딕셔너리를 추가합니다.
+            project='klue-roberta-large'  # project의 이름을 추가합니다.
+        )
+        wandb.agent(
+            sweep_id=sweep_id,  # sweep의 정보를 입력하고
+            function=sweep_train,  # train이라는 모델을 학습하는 코드를
+            count=1  # 총 3회 실행해봅니다.
+        )
 
+    elif args.mode == 'test':
+        pt_name = 'klue-roberta-large_lr2.306e-06_epoch5_model.pt'
+        trainer = pl.Trainer(max_epochs=args.max_epoch, log_every_n_steps=1, precision=16)
+
+        model = torch.load(pt_name)
+        predictions = trainer.predict(model=model, datamodule=dataloader)
+        predictions = list(round(float(i), 1) for i in torch.cat(predictions))
+
+        output = pd.read_csv('../data/sample_submission.csv')
+        output['target'] = predictions
+        output.to_csv('./outputs/' + pt_name[:-3] + '.csv', index=False)
 
 
     # if args.mode == 'train':
