@@ -10,16 +10,17 @@ import torch
 
 class Ensemble():
     def __init__(self):
-        # self.files = glob('./outputs2/*.csv')
-        self.files = os.listdir('./outputs2')
+        # self.files = glob('./outputs/*.csv')
+        self.files = os.listdir('./outputs')
         self.files = [(file, float(file.replace('.csv', "").split('_')[1])) for file in self.files]
+        print(self.files)
 
     def soft_vote_ensemble(self):
         print("===========================ensemble start===========================")
         num_files = len(self.files)  # (filename, score)
         print(self.files)
         scores = torch.Tensor([inference[1] for inference in self.files])
-        inf_list = [pd.read_csv('./outputs2/' + inference[0])['target'] for inference in self.files]
+        inf_list = [pd.read_csv('./outputs/' + inference[0])['target'] for inference in self.files]
 
         scores = F.softmax(scores, dim=-1)
         inf_list = [inf_list[i] * scores[i].item() for i in range(num_files)]
